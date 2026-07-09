@@ -1,8 +1,9 @@
 # DevOps Quiz
 
-**Cloud-native quiz platform** — a production-grade system of ~20 microservices
-deployed to Kubernetes via Helm, with the entire infrastructure — from cloud
-network to the cluster itself — provisioned from code with Terraform.
+**Cloud-native quiz platform** — a microservice system (9 backend services,
+3 frontend apps and a full set of stateful dependencies) deployed to
+Kubernetes via Helm, with the entire infrastructure — from cloud network to
+the cluster itself — provisioned from code with Terraform.
 
 🌐 Live: [devops-quiz.com](https://devops-quiz.com) · [app.devops-quiz.com](https://app.devops-quiz.com)
 
@@ -11,76 +12,106 @@ network to the cluster itself — provisioned from code with Terraform.
 ## What is this?
 
 DevOps Quiz lets users **create quizzes**, **embed them on any website** via a
-lightweight widget, and **manage everything** through an admin application.
+lightweight widget, collect **leads** from quiz responses and manage everything
+through a personal account.
 
-This hub repository is the entry point to the whole platform: architecture
-overview, links to all components, and a one-command local setup.
+This hub repository is the entry point to the whole platform: architecture,
+links to all components, and deployment overview.
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph Cloud ["☁️ Cloud — provisioned by Terraform"]
-        subgraph K8s ["Kubernetes Cluster"]
-            Land["land<br/>devops-quiz.com"]
-            App["app<br/>app.devops-quiz.com"]
-            API["backend API<br/>(private source)"]
-            Runner["GitLab Runner<br/>(self-hosted CI)"]
-            Land --> API
-            App --> API
-            API --> PG[("PostgreSQL")]
-            API --> Redis[("Redis")]
+    User((User)) --> Land["land<br/>promo site · Hugo"]
+    User --> App["app<br/>user account · React"]
+    Visitor((Site visitor)) --> Show["show<br/>traffic routing,<br/>serves quiz widget"]
+
+    subgraph K8s ["⎈ Kubernetes — cluster provisioned by Terraform"]
+        Land -.-> MicroAPI
+        App --> MicroAPI["microapi<br/>API gateway :8090"]
+        Show --> MicroAPI
+
+        subgraph Services ["go-micro services"]
+            Quiz["quiz"]
+            Leads["leads"]
+            Users["users"]
+            Notif["notif"]
+            Jobber["jobber<br/>scheduled tasks"]
+            Chrome["chrome<br/>quiz screenshots"]
+            Uploader["uploader<br/>file uploads"]
         end
-        S3[("S3 Buckets<br/>assets & widget bundle")]
-        API --> S3
+
+        MicroAPI --> NATS[("NATS<br/>message bus")]
+        NATS --> Quiz & Leads & Users & Notif
+        Jobber --> NATS
+        Services -.-> Consul[("Consul<br/>service discovery")]
     end
 
-    Widget["widget<br/>embedded on any site"] -->|fetches quiz| API
-    S3 -->|serves bundle| Widget
+    Quiz & Leads & Users --> CRDB[("CockroachDB")]
+    Services --> Redis[("Redis")]
+    Uploader & Show --> S3[("S3<br/>user data & widget bundle")]
+    S3 --> ImgProxy["imageproxy<br/>on-the-fly resize"]
+    Notif --> SMTP["SMTP / mailhog"]
 
-    Dev["git push"] --> CI["CI/CD Pipeline<br/>(shared CI library)"]
-    CI --> Runner
-    CI -->|"build & push images"| Reg[("Container Registry")]
-    CI -->|"DB migrations"| PG
-    CI -->|"helm upgrade"| K8s
-    CI -->|"per-branch"| Envs["Dynamic Review Environments"]
+    Dev["git push"] --> CI["CI/CD<br/>shared CI library +<br/>self-hosted runners"]
+    CI -->|images| Registry[("Container Registry")]
+    CI -->|helm upgrade| K8s
+    CI -->|per branch| Review["Dynamic review envs"]
 ```
 
-## Repositories
+## Services
+
+**Frontend** ([DevOps-Quiz-Frontend](https://github.com/Slavk11/DevOps-Quiz-Frontend)):
+
+| App | Stack | Purpose |
+|---|---|---|
+| `app` | ReactJS | Quiz management & leads — user's personal account |
+| `land` | Hugo (static) | Promo site |
+| `widget` | JS bundle | Embeddable quiz renderer, served via `show` |
+
+**Backend** (🔒 private source, public images) — Go microservices on **go-micro**:
+
+| Service | Purpose |
+|---|---|
+| `microapi` | API gateway — single entry point for HTTP clients |
+| `quiz` | Quiz domain logic |
+| `leads` | Quiz responses / leads |
+| `users` | User accounts |
+| `notif` | Multi-channel notifications |
+| `jobber` | Background & scheduled tasks |
+| `chrome` | Quiz screenshots via headless Chrome |
+| `show` | Traffic routing, serves the built widget |
+| `uploader` | File uploads (from quizzes and the account) |
+
+**Dependencies:** CockroachDB · Redis · NATS (message bus) · Consul (service
+discovery) · imageproxy · S3-compatible storage · SMTP (mailhog for non-prod) ·
+container registry · monitoring & logging · automated backups
+
+## Platform repositories
 
 | Repository | Purpose | Access |
 |---|---|---|
 | **[DevOps-Quiz-Terraform](https://github.com/Slavk11/DevOps-Quiz-Terraform)** | IaC core: cloud network, Kubernetes cluster, S3 buckets | public |
-| **[DevOps-Quiz-Infra](https://github.com/Slavk11/DevOps-Quiz-Infra)** | Platform infrastructure & environment configuration | public |
-| **[DevOps-Quiz-Charts](https://github.com/Slavk11/DevOps-Quiz-Charts)** | Helm charts: umbrella chart + per-service subcharts, ingress & domain routing | public |
+| **[DevOps-Quiz-Infra](https://github.com/Slavk11/DevOps-Quiz-Infra)** | In-cluster platform: ingress, TLS, stateful dependencies, review-env machinery | public |
+| **[DevOps-Quiz-Charts](https://github.com/Slavk11/DevOps-Quiz-Charts)** | Helm charts: umbrella + per-service subcharts, domain routing | public |
 | **[DevOps-Quiz-CI-Lib](https://github.com/Slavk11/DevOps-Quiz-CI-Lib)** | Reusable CI/CD pipeline library: build → test → migrate → deploy | public |
-| **[DevOps-Quiz-Gitlab-Runner](https://github.com/Slavk11/DevOps-Quiz-Gitlab-Runner)** | Self-hosted CI runners deployed in the cluster | public |
-| **[DevOps-Quiz-Frontend](https://github.com/Slavk11/DevOps-Quiz-Frontend)** | Three apps: `land` (promo site), `app` (quiz builder & admin), `widget` (embeddable quiz renderer) | public |
-| **DevOps-Quiz-Backend** | Core API: quiz engine, auth, data layer | 🔒 private (source closed) |
-
-> Backend source is private, but its **Docker image is public** — the whole
-> platform is fully runnable without access to the source code.
-
-## Quick start (local)
-
-```bash
-git clone https://github.com/Slavk11/DevOps-Quiz.git
-cd DevOps-Quiz
-docker compose up -d
-```
-
-Starts the backend (public image), frontend apps, PostgreSQL and Redis.
+| **[DevOps-Quiz-Gitlab-Runner](https://github.com/Slavk11/DevOps-Quiz-Gitlab-Runner)** | Self-hosted CI runners in the cluster | public |
+| **[DevOps-Quiz-Frontend](https://github.com/Slavk11/DevOps-Quiz-Frontend)** | `app` + `land` + `widget` | public |
+| **DevOps-Quiz-Backend** | 9 Go microservices | 🔒 private (source closed) |
 
 ## Full deploy (cloud)
 
 From an empty cloud account to a running platform:
 
 ```bash
-# 1. Provision infrastructure: network, cluster, S3, runners
+# 1. Infrastructure: network, cluster, S3
 git clone https://github.com/Slavk11/DevOps-Quiz-Terraform.git
 cd DevOps-Quiz-Terraform && terraform init && terraform apply
 
-# 2. Deploy the platform
+# 2. In-cluster platform: ingress, TLS, databases, NATS, Consul
+#    see DevOps-Quiz-Infra
+
+# 3. Application services
 git clone https://github.com/Slavk11/DevOps-Quiz-Charts.git
 cd DevOps-Quiz-Charts && helm install devops-quiz ./umbrella
 ```
@@ -88,37 +119,37 @@ cd DevOps-Quiz-Charts && helm install devops-quiz ./umbrella
 ## CI/CD
 
 Every push runs the full delivery cycle through the shared
-[CI library](https://github.com/Slavk11/DevOps-Quiz-CI-Lib):
+[CI library](https://github.com/Slavk11/DevOps-Quiz-CI-Lib) on
+[self-hosted runners](https://github.com/Slavk11/DevOps-Quiz-Gitlab-Runner):
 
 ```
 build images → tests → DB migrations → helm upgrade → deploy
 ```
 
 - **Dynamic review environments** — every branch gets an isolated environment
-  in the cluster with its own URL, torn down on merge
-- **Zero-touch releases** — migrations and rollout fully automated, no manual
-  steps between commit and production
-- **Self-hosted runners** — CI runners live in the cluster
-  ([DevOps-Quiz-Gitlab-Runner](https://github.com/Slavk11/DevOps-Quiz-Gitlab-Runner)),
-  provisioned from code
-- **Reusable pipeline library** — all ~20 services share one versioned set of
-  CI templates instead of copy-pasted configs
+  with its own URL, torn down on merge
+- **Zero-touch releases** — migrations and rollout fully automated
+- **DRY pipelines** — all services share one versioned CI template library
+  instead of copy-pasted configs
 
 ## Tech stack
 
 | Layer | Tools |
 |---|---|
 | Infrastructure | Terraform, Kubernetes, S3 |
-| Delivery | Helm (umbrella chart), GitLab CI, self-hosted runners, dynamic review envs |
-| Backend | REST API, PostgreSQL, Redis *(source private)* |
-| Frontend | `land` + `app` + `widget`, widget shipped as a static bundle from S3/CDN |
+| Delivery | Helm (umbrella chart), GitLab CI, self-hosted runners, review envs |
+| Backend | Go, go-micro, NATS, Consul, CockroachDB, Redis |
+| Frontend | ReactJS (`app`), Hugo (`land`), static JS widget |
+| Ops | Monitoring & logging, automated DB backups |
 
 ## Highlights
 
 - ⚡ **Infrastructure from zero** — the cluster isn't a given, it's created by code
-- 📦 **~20 microservices, one command** — umbrella Helm chart deploys everything
+- 📦 **12 services, one command** — umbrella Helm chart deploys the whole platform
+- 📨 **Event-driven core** — services talk through NATS with Consul discovery,
+  not point-to-point HTTP spaghetti
 - 🌿 **Review environment per branch** — isolated, disposable, automatic
-- 🔁 **DRY pipelines** — one CI library serving every service in the platform
+- 🔁 **DRY pipelines** — one CI library serving every service
 - 🔓 **Reproducible delivery** — closed source, open pipeline: anyone can run the platform
 
 ---
